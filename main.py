@@ -1,5 +1,5 @@
 import polars as pl
-from scripts.build_dataset import prepare_df, load_htmls, build_targets, build_data_tensors
+from scripts.prep_dataframe import prepare_df, load_htmls, build_targets, build_data_tensors
 from dataloader import prepare_dataloading, df_to_parquet
 from transformers import AutoTokenizer
 

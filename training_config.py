@@ -1,0 +1,7 @@
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
+CHECKPOINT_DIR = "./checkpoints/"
+
+SAVE_STEPS = 1_000
+MAX_TRAINING_STEPS = 1_000
+LOGGING_STEPS = 100

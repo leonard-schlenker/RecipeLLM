@@ -1,0 +1,15 @@
+[project]
+name = "recipellm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "accelerate>=1.14.0",
+    "datasets>=5.0.0",
+    "polars>=1.42.0",
+    "scrapy>=2.16.0",
+    "seaborn>=0.13.2",
+    "torch>=2.12.1",
+    "transformers>=5.12.1",
+]

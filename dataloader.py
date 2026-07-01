@@ -1,44 +1,24 @@
-import polars as pl
-import pyarrow.parquet as pq
 from transformers import AutoTokenizer
-from datasets import IterableDataset, Dataset
+from training_config import MODEL_NAME
 
-def df_to_parquet(df: pl.DataFrame, prep: callable, parquet_path: str, n_proc: int=1, batched: bool=True):
-    ds = IterableDataset.from_polars(df)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    ds = ds.map(prep, batched=batched, remove_columns=["input", "target"])
+def process_batch(batch): 
 
-    # `datasets.to_parquet` reserves `compression` internally, so write with pyarrow
-    # directly. zstd at a high level gives near-best ratio with fast decompression.
-    table = Dataset.from_list(list(ds)).data.table
-    pq.write_table(table, parquet_path, compression="zstd", compression_level=19)
+    input_ids = tokenizer.apply_chat_template(batch["input"], 
+                                              tokenize=False, 
+                                              add_generation_prompt=True, 
+                                              )
 
-def prepare_dataloading(df: pl.DataFrame): 
+    input_ids = tokenizer(input_ids, 
+                          return_attention_mask=False)["input_ids"]
 
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    response_ids = tokenizer(batch["response"] + [tokenizer.eos_token], 
+                             return_attention_mask=False)["input_ids"]
 
-    def preprocess(batch): 
+    labels = [-100] * len(input_ids) + response_ids 
 
-        prompt = batch["input"]
+    input_ids += response_ids
 
-        response = batch["target"]
+    return {"input_ids": input_ids, "labels": labels}
 
-        input_ids = tokenizer(prompt, 
-                              add_special_tokens=False, 
-                              return_attention_mask=False)["input_ids"]
-
-        target_ids = tokenizer(response, 
-                               add_special_tokens=False, 
-                               return_attention_mask=False)["input_ids"]
-
-        total_ids = [ipt + tgt for ipt, tgt in zip(input_ids, target_ids)]
-
-        labels = total_ids.copy()
-
-        for i in range(len(labels)): 
-            labels[i][:len(input_ids)] = [-100] * len(input_ids)
-
-        return {"input_ids": total_ids, "labels": labels}
-
-    return tokenizer, preprocess
-    

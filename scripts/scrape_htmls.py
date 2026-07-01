@@ -29,29 +29,17 @@ import polars as pl
 import scrapy
 from scrapy.crawler import CrawlerProcess
 
-# All data lives on the 128GB USB stick: the source CSV, the failed-downloads
-# log, and the html_cache (214K+ files already copied there). Override RAW_DIR
-# via the environment to point at a different mount (or "./data/raw" for the
-# original local layout shared with download_htmls.py / build_dataset.py).
-RAW_DIR = os.environ.get("RAW_DIR", "/Volumes/USB/raw")
-SOURCE_CSV = os.path.join(RAW_DIR, "RecipeNLG_dataset.csv")
-HTML_CACHE_DIR = os.path.join(RAW_DIR, "html_cache")
-FAILED_LOG = os.path.join(RAW_DIR, "failed_downloads.log")
-
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+from data_generation_config import (
+    HTML_CACHE_DIR, 
+    CLEANED_DATASET_PATH, 
+    HTML_CACHE_DIR, 
+    FAILED_LOG, 
+    USER_AGENT, 
+    CONCURRENT_PER_DOMAIN, 
+    CONCURRENT_REQUESTS, 
+    PROGRESS_EVERY, 
+    SEED_YIELD_EVERY
 )
-
-# Throughput knobs — overridable from the environment for quick tuning.
-CONCURRENT_REQUESTS = int(os.environ.get("CONCURRENT_REQUESTS", 200))
-# Across many distinct hosts the global limit dominates; the per-domain cap is
-# what keeps any single site from banning us. Raise it for more aggression.
-CONCURRENT_PER_DOMAIN = int(os.environ.get("CONCURRENT_PER_DOMAIN", 16))
-
-# Log a progress line every this many successfully-saved pages.
-PROGRESS_EVERY = int(os.environ.get("PROGRESS_EVERY", 100))
 
 # --- TEMPORARY DISK CAP -----------------------------------------------------
 # Hard limit on the TOTAL number of HTML files on disk (already-cached files +
@@ -61,11 +49,6 @@ PROGRESS_EVERY = int(os.environ.get("PROGRESS_EVERY", 100))
 # once the dataset lives on bigger storage.
 MAX_TOTAL_FILES = 1_000_000
 # ---------------------------------------------------------------------------
-
-# During seeding, hand control back to the event loop every this many requests
-# so downloads run while the large start list is still being built.
-SEED_YIELD_EVERY = 200
-
 
 def load_failed_urls() -> set[str]:
     if not os.path.exists(FAILED_LOG):
@@ -89,7 +72,7 @@ def load_links() -> list[str]:
     crawl (which would stall all downloads).
     """
     return (
-        pl.read_csv(SOURCE_CSV, columns=["link"])
+        pl.read_csv(CLEANED_DATASET_PATH, columns=["link"])
         .with_columns(
             pl.when(pl.col("link").str.starts_with("www."))
             .then(pl.col("link"))
@@ -203,14 +186,14 @@ class RecipeSpider(scrapy.Spider):
         self.logger.info("Done (%s): %d pages successfully downloaded.", reason, self.saved)
 
 
-def main():
+def scrape_htmls():
     os.makedirs(HTML_CACHE_DIR, exist_ok=True)
 
     # Do the heavy CSV read + shuffle here, before the reactor starts, so it
     # never blocks downloads. Printed so it's obvious the script is working
     # during the few-second load rather than looking hung.
     t0 = time.time()
-    print(f"Reading and shuffling links from {SOURCE_CSV} ...", flush=True)
+    print(f"Reading and shuffling links from {CLEANED_DATASET_PATH} ...", flush=True)
     links = load_links()
     pending = pending_downloads(links)
     already_cached = len(links) - len(pending)
@@ -292,4 +275,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    scrape_htmls()
