@@ -13,11 +13,9 @@ def merge_htmls_with_dataset():
                    on="hash", 
                    how="inner").select(
                        pl.col("response"), 
-                       pl.concat_list(
-                           pl.struct(role=pl.lit("user"),
-                                 content=pl.col("html_data"))
-                       ).alias("input")
-                ).sink_parquet(TRAINING_READY_DATASET_PATH, engine="streaming")
+                       pl.struct(role=pl.lit("user"),
+                                 content=pl.col("html_data")).struct.json_encode().alias("input")
+                ).sink_parquet(TRAINING_READY_DATASET_PATH, engine="streaming", compression="zstd")
 
 
 if __name__ == '__main__': 
