@@ -14,9 +14,22 @@ from transformers import (
     DataCollatorForSeq2Seq, 
     AutoModelForCausalLM
 )
+from peft import LoraConfig, PeftModel, get_peft_model
 
 def train(): 
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+
+    model = get_peft_model(model, lora_config)
 
     dataset = load_dataset("parquet", 
                            data_files=TRAINING_READY_DATASET_PATH, 
