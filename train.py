@@ -15,6 +15,7 @@ from transformers import (
     AutoModelForCausalLM
 )
 from peft import LoraConfig, PeftModel, get_peft_model
+from torch import float16
 
 def train(): 
 
@@ -27,7 +28,8 @@ def train():
         task_type="CAUSAL_LM",
     )
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, 
+                                                 torch_dtype=float16)
 
     model = get_peft_model(model, lora_config)
 
@@ -37,7 +39,9 @@ def train():
                            streaming=True)
 
     dataset = dataset.shuffle(seed=42, buffer_size=10_000)
-    dataset = dataset.map(process_batch, batched=True)
+    dataset = dataset.map(process_batch, 
+                          batched=True, 
+                          remove_columns=["input", "response"])
 
     collator = DataCollatorForSeq2Seq(tokenizer, 
                                       padding=True, 
