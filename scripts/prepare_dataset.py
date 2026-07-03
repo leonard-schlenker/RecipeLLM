@@ -3,7 +3,7 @@ The goal of this script is to prepare the downloaded RecipeNLG dataset for scrap
 """
 
 import polars as pl 
-from data_generation_config import ORIG_DATASET_PATH, TRAINING_SPLIT_DATASET_PATH, EVAL_SPLIT_DATASET_PATH
+from data_generation_config import ORIG_DATASET_PATH, CLEANED_DATASET_PATH
 import hashlib
 from typing import Tuple
 
@@ -73,6 +73,14 @@ def compute_dataset_split(df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame]
 
     return training, eval 
 
+def sample_by_website(df, n): 
+    df = df.partition_by("website")
+    partitions = [p.sample(n) for p in df]
+    df = pl.concat(partitions, how='vertical')
+    return df 
+
+def get_website_distrbution(df): 
+    return df.group_by("website").len()
 
 def prepare_dataset(): 
     df = pl.read_csv(ORIG_DATASET_PATH)
@@ -86,6 +94,7 @@ def prepare_dataset():
     df = compute_link_hashes(df)
 
     df = df.select(
+        pl.col("link"),
         pl.col("website"), 
         pl.col("hash"), 
         pl.col("response")
@@ -95,18 +104,27 @@ def prepare_dataset():
 
     training, eval = compute_dataset_split(df)
 
-    training = training.select(
-        pl.col("hash"), 
-        pl.col("response")
+    training_websites = get_website_distrbution(training)
+    training_min_sample_size = training_websites["website"].min()
+
+    eval_websites = get_website_distrbution(eval)
+    eval_min_sample_size = eval_websites["website"].min()
+
+    training = sample_by_website(training, training_min_sample_size)
+    eval = sample_by_website(eval, eval_min_sample_size)
+
+    training = training.with_columns(
+        pl.lit(True).alias("train")
     )
 
-    eval = eval.select(
-        pl.col("hash"), 
-        pl.col("response")
+    eval = eval.with_columns(
+        pl.lit(False).alias("train")
     )
 
-    training.write_parquet(TRAINING_SPLIT_DATASET_PATH)
-    eval.write_parquet(EVAL_SPLIT_DATASET_PATH)
+    training = training.vstack(eval)
+
+    training.write_parquet(CLEANED_DATASET_PATH)
+
 
 if __name__ == '__main__': 
     prepare_dataset()
