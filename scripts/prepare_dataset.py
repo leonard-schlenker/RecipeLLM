@@ -3,8 +3,9 @@ The goal of this script is to prepare the downloaded RecipeNLG dataset for scrap
 """
 
 import polars as pl 
-from data_generation_config import CLEANED_DATASET_PATH, ORIG_DATASET_PATH
+from data_generation_config import ORIG_DATASET_PATH, TRAINING_SPLIT_DATASET_PATH, EVAL_SPLIT_DATASET_PATH
 import hashlib
+from typing import Tuple
 
 def format_links(df: pl.LazyFrame) -> pl.LazyFrame: 
     df = df.with_columns(
@@ -51,6 +52,28 @@ def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame:
 
     return df 
 
+def compute_dataset_split(df: pl.LazyFrame) -> Tuple[pl.LazyFrame, pl.LazyFrame]: 
+
+    # we take ~10% of the dataset for evaluation 
+    # this is about the first 16 websites due to the sample distribution 
+
+    website_groups = df.group_by("website").len()
+
+    website_groups = website_groups.with_columns(
+        (pl.col("len") / len(df)).alias("frequency")
+    )
+
+    eval_websites = website_groups.sort("frequency").head(16)["website"]
+
+    df = df.with_columns(
+        pl.col("website").is_in(eval_websites).alias("eval")
+    )
+
+    training, eval = df.partition_by("eval", as_dict=True, include_key=False).values()
+
+    return training, eval 
+
+
 def prepare_dataset(): 
     df = pl.read_csv(ORIG_DATASET_PATH)
 
@@ -58,18 +81,32 @@ def prepare_dataset():
 
     df = format_links(df)
     df = extract_websites(df)
+
     df = build_responses(df)
     df = compute_link_hashes(df)
 
     df = df.select(
+        pl.col("website"), 
         pl.col("hash"), 
         pl.col("response")
     )
 
     df = df.collect()
 
-    df.write_parquet(CLEANED_DATASET_PATH)
+    training, eval = compute_dataset_split(df)
 
+    training = training.select(
+        pl.col("hash"), 
+        pl.col("response")
+    )
+
+    eval = eval.select(
+        pl.col("hash"), 
+        pl.col("response")
+    )
+
+    training.write_parquet(TRAINING_SPLIT_DATASET_PATH)
+    eval.write_parquet(EVAL_SPLIT_DATASET_PATH)
 
 if __name__ == '__main__': 
     prepare_dataset()
