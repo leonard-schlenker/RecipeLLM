@@ -52,7 +52,7 @@ def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame:
 
     return df 
 
-def compute_dataset_split(df: pl.LazyFrame) -> Tuple[pl.LazyFrame, pl.LazyFrame]: 
+def compute_dataset_split(df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame]: 
 
     # we take ~10% of the dataset for evaluation 
     # this is about the first 16 websites due to the sample distribution 
