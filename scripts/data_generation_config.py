@@ -1,6 +1,5 @@
-HTML_CACHE_DIR = "/run/media/lenni/HDD1GB/temp_html_files/"
-TRAINING_SPLIT_DATASET_PATH = "./data/raw/RecipeNLG_train_dataset.parquet"
-EVAL_SPLIT_DATASET_PATH = "./data/raw/RecipeNLG_eval_dataset.parquet"
+HTML_CACHE_DIR = "./data/raw/htmls/"
+CLEANED_DATASET_PATH = "./data/dataset/RecipeNLG_dataset_cleaned.parquet"
 ORIG_DATASET_PATH = "./data/raw/RecipeNLG_dataset.csv"
 
 # downloading html files containing the recipe in humand-readable format
