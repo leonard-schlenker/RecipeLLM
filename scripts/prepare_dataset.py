@@ -2,9 +2,8 @@
 The goal of this script is to prepare the downloaded RecipeNLG dataset for scraping and dataset creation. 
 """
 
-import polars as pl 
+import polars as pl
 from data_generation_config import ORIG_DATASET_PATH, CLEANED_DATASET_PATH
-import hashlib
 from typing import Tuple
 
 def format_links(df: pl.LazyFrame) -> pl.LazyFrame: 
@@ -40,17 +39,17 @@ def build_responses(df: pl.LazyFrame) -> pl.LazyFrame:
 
     return df
 
-def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame: 
+def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame:
+    # Native polars hash runs parallel over the column, unlike a per-row
+    # hashlib map_elements. Stored as string because downstream the hash is
+    # both a cache filename stem and a join key. Polars hashes are not stable
+    # across polars versions, so this stored column is the single source of
+    # truth — never recompute it, always read it back (scrape_htmls.py does).
     df = df.with_columns(
-        pl.concat_str(
-            pl.lit("http://"), 
-            pl.col("link")
-        ).map_elements(
-            lambda url: hashlib.md5(url.encode()).hexdigest()
-        ).alias("hash")
+        pl.col("link").hash(seed=0).cast(pl.String).alias("hash")
     )
 
-    return df 
+    return df
 
 def compute_dataset_split(df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame]: 
 
@@ -105,10 +104,10 @@ def prepare_dataset():
     training, eval = compute_dataset_split(df)
 
     training_websites = get_website_distrbution(training)
-    training_min_sample_size = training_websites["website"].min()
+    training_min_sample_size = training_websites["len"].min()
 
     eval_websites = get_website_distrbution(eval)
-    eval_min_sample_size = eval_websites["website"].min()
+    eval_min_sample_size = eval_websites["len"].min()
 
     training = sample_by_website(training, training_min_sample_size)
     eval = sample_by_website(eval, eval_min_sample_size)
