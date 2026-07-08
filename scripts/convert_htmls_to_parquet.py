@@ -4,6 +4,7 @@ from pathlib import Path
 from pyarrow.parquet import ParquetWriter
 import pyarrow as pa
 import math
+from bs4 import BeautifulSoup
 
 from data_generation_config import (
     BATCH_SIZE, 
@@ -12,8 +13,20 @@ from data_generation_config import (
     HTML_PARQUET_PATH
 )
 
+def clean_html(html: str) -> str: 
+    text = BeautifulSoup(html, 'lxml').get_text()
+    text = text.replace(r"\n+", " ")
+    text = text.replace(r"\t+", " ")
+    text = text.replace(r"\ +", " ")
+    return text
+
 def load_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+def preprocess_file(path: Path) -> str: 
+    return clean_html(
+        load_file(path)
+    )
 
 def batch(iterable, n):
     it = iter(iterable)
@@ -30,7 +43,7 @@ def convert_htmls_to_parquet():
         with ThreadPoolExecutor(max_workers=N_WORKERS_FILE_LOADING) as pool: 
             for file_batch in batch(files, BATCH_SIZE): 
                 print(f"Processing batch {i}/{total_files}")
-                results = list(pool.map(load_file, file_batch))
+                results = list(pool.map(preprocess_file, file_batch))
                 file_names = list(map(lambda x: x.stem, file_batch))
                 table = pa.Table.from_arrays([file_names, results], schema=schema)
                 writer.write_table(table, row_group_size=512)

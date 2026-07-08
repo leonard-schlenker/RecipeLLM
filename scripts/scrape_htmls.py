@@ -1,9 +1,10 @@
 """Bulk-download recipe HTML with Scrapy, tuned for maximal throughput.
 
 This is a self-contained, drop-in alternative to ``download_htmls.py``. It reads
-the same source CSV, applies the same ``www.``-prefix normalisation, and writes
-each page to ``data/raw/html_cache/<md5(url)>.html`` — exactly the cache layout
-that ``build_dataset.py`` reads back — so the two downloaders are interchangeable.
+the same source CSV and writes each page to
+``data/raw/html_cache/<hash>.html``, where ``hash`` is the precomputed link
+hash stored by ``prepare_dataset.py`` — exactly the cache layout that
+``build_dataset.py`` reads back — so the two downloaders are interchangeable.
 
 Run it directly:
 
@@ -17,38 +18,39 @@ Why Scrapy over the asyncio version: a single Twisted reactor drives all I/O,
 DNS resolution runs on a dedicated thread pool, connection reuse / retry /
 redirect handling are built in, and start_requests is consumed lazily so the
 2M+ URL list never has to be materialised as pending tasks at once.
+
+Every pending link is attempted. Failure handling is two-phase: Scrapy's
+immediate RetryMiddleware is disabled; instead, first-round failures are
+collected and re-tried once at the *end* of the crawl (via the spider_idle
+signal), after every fresh URL has been attempted. A URL that fails both
+rounds is deemed unreachable, written to FAILED_LOG, and its slot is refilled
+with a fresh URL from the backlog beyond the FILE_LIMIT budget — so the crawl
+keeps going until FILE_LIMIT files are on disk or the links run out.
 """
 
 import asyncio
-import hashlib
 import logging
 import os
 import time
 
 import polars as pl
 import scrapy
+from scrapy import signals
 from scrapy.crawler import CrawlerProcess
+from scrapy.exceptions import DontCloseSpider
 
 from data_generation_config import (
-    HTML_CACHE_DIR, 
-    CLEANED_DATASET_PATH, 
-    HTML_CACHE_DIR, 
-    FAILED_LOG, 
-    USER_AGENT, 
-    CONCURRENT_PER_DOMAIN, 
-    CONCURRENT_REQUESTS, 
-    PROGRESS_EVERY, 
-    SEED_YIELD_EVERY
+    HTML_CACHE_DIR,
+    CLEANED_DATASET_PATH,
+    FAILED_LOG,
+    FILE_LIMIT,
+    USER_AGENT,
+    CONCURRENT_PER_DOMAIN,
+    CONCURRENT_REQUESTS,
+    PROGRESS_EVERY,
+    SEED_YIELD_EVERY,
+    RETRY_BATCH_SIZE,
 )
-
-# --- TEMPORARY DISK CAP -----------------------------------------------------
-# Hard limit on the TOTAL number of HTML files on disk (already-cached files +
-# this run's downloads). At ~10K HTML files per GB, 1M files is ~100GB, which
-# fits the current 128GB USB stick with headroom; the full ~2M-link dataset
-# would overflow it. Remove this constant and the truncation block in main()
-# once the dataset lives on bigger storage.
-MAX_TOTAL_FILES = 1_000_000
-# ---------------------------------------------------------------------------
 
 def load_failed_urls() -> set[str]:
     if not os.path.exists(FAILED_LOG):
@@ -57,14 +59,17 @@ def load_failed_urls() -> set[str]:
         return {line.strip() for line in f if line.strip()}
 
 
-def load_links() -> list[str]:
-    """Read, normalise and shuffle every recipe link from the source CSV.
+def load_links() -> list[tuple[str, str]]:
+    """Read and shuffle every (link, hash) pair from the cleaned dataset.
 
-    Normalisation matches download_htmls.py: ensure a ``www.`` prefix. The CSV is
-    grouped by website, so in CSV order almost all in-flight requests hit a single
-    host, where CONCURRENT_REQUESTS_PER_DOMAIN throttles throughput to a trickle
-    while the global budget sits idle. Shuffling spreads the concurrent slots
-    across many domains at once — that's what actually unlocks the configured
+    Links are already ``www.``-normalised by prepare_dataset.py, and ``hash``
+    is the precomputed cache-filename stem from the same script — polars
+    hashes are not stable across versions, so it must be read back, never
+    recomputed here. The dataset is grouped by website, so in stored order
+    almost all in-flight requests hit a single host, where
+    CONCURRENT_REQUESTS_PER_DOMAIN throttles throughput to a trickle while the
+    global budget sits idle. Shuffling spreads the concurrent slots across
+    many domains at once — that's what actually unlocks the configured
     throughput (and is gentler per host).
 
     Reading + shuffling 2M+ rows takes a few seconds; we do it here, up front,
@@ -72,18 +77,13 @@ def load_links() -> list[str]:
     crawl (which would stall all downloads).
     """
     return (
-        pl.read_csv(CLEANED_DATASET_PATH, columns=["link"])
-        .with_columns(
-            pl.when(pl.col("link").str.starts_with("www."))
-            .then(pl.col("link"))
-            .otherwise(pl.lit("www.") + pl.col("link"))
-        )["link"]
+        pl.read_parquet(CLEANED_DATASET_PATH, columns=["link", "hash"])
         .sample(fraction=1.0, shuffle=True, seed=0)
-        .to_list()
+        .rows()
     )
 
 
-def pending_downloads(links: list[str]) -> list[tuple[str, str]]:
+def pending_downloads(links: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Filter ``links`` down to (url, cache_path) pairs not yet on disk.
 
     Crucially this snapshots the cache directory **once** with a single
@@ -95,23 +95,26 @@ def pending_downloads(links: list[str]) -> list[tuple[str, str]]:
     """
     cached = set(os.listdir(HTML_CACHE_DIR)) if os.path.isdir(HTML_CACHE_DIR) else set()
     pending = []
-    for link in links:
-        url = f"http://{link}"
-        filename = hashlib.md5(url.encode()).hexdigest() + ".html"
+    for link, link_hash in links:
+        filename = link_hash + ".html"
         if filename not in cached:
-            pending.append((url, os.path.join(HTML_CACHE_DIR, filename)))
+            pending.append((f"http://{link}", os.path.join(HTML_CACHE_DIR, filename)))
     return pending
 
 
 class RecipeSpider(scrapy.Spider):
     name = "recipes"
 
-    def __init__(self, pending=None, *args, **kwargs):
+    def __init__(self, pending=None, backlog=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Pre-built (url, cache_path) pairs still to fetch — already shuffled and
         # cache-filtered in main() before the reactor starts, so seeding does no
         # filesystem work and can't stall the reactor.
         self.pending = pending or []
+        # Uncached pairs beyond the FILE_LIMIT budget. Each permanently failed
+        # URL draws one replacement from here, so the number of *successful*
+        # downloads converges on the budget instead of budget-minus-failures.
+        self.backlog = iter(backlog or [])
         # Failed-download bookkeeping, still written to FAILED_LOG on close:
         # remember which URLs were known-failed coming in, recover any that now
         # succeed, and dedupe new failures. Scrapy runs callbacks serially on the
@@ -120,6 +123,20 @@ class RecipeSpider(scrapy.Spider):
         self.recovered: set[str] = set()
         self.newly_failed: set[str] = set()
         self.saved = 0
+        # First-round failures, retried once at the end of the crawl. A plain
+        # list of (url, cache_path); callbacks run serially on the reactor
+        # thread, so no locking needed.
+        self.retry_pending: list[tuple[str, str]] = []
+        self.retry_phase_started = False
+
+    @classmethod
+    def from_crawler(cls, crawler, *args, **kwargs):
+        spider = super().from_crawler(crawler, *args, **kwargs)
+        # spider_idle fires when the scheduler is empty and nothing is in
+        # flight — i.e. every fresh URL has been attempted. That's when we
+        # inject the retry round.
+        crawler.signals.connect(spider.on_idle, signal=signals.spider_idle)
+        return spider
 
     # No link following: every request is a terminal page we save to disk.
     # Seeding does zero filesystem work — the cache filtering already happened in
@@ -168,10 +185,61 @@ class RecipeSpider(scrapy.Spider):
             self.logger.info("saved %d pages (latest: %s)", self.saved, url)
 
     def on_error(self, failure):
-        # Record the failure to FAILED_LOG (written on close) but don't log it to
-        # the console — failures are the common case here and would drown out the
-        # progress output.
-        self.newly_failed.add(failure.request.url)
+        # DNS errors, timeouts and HTTP error statuses (via HttpError) all land
+        # here. First failure: queue the URL for one deferred retry at the end
+        # of the crawl. Second failure: the URL is unreachable — record it for
+        # FAILED_LOG (written on close) and draw a fresh replacement URL from
+        # the backlog, so every permanently failed slot is refilled and the
+        # success count still reaches the FILE_LIMIT budget. Replacements are
+        # ordinary first-round requests: if one fails it re-enters the same
+        # retry-then-replace cycle. Errback output is scheduled by Scrapy just
+        # like callback output, so we can simply yield the new request here.
+        # Nothing is logged to the console; failures are common here and would
+        # drown out the progress output.
+        request = failure.request
+        if request.meta.get("is_retry"):
+            self.newly_failed.add(request.cb_kwargs["url"])
+            replacement = next(self.backlog, None)
+            if replacement is not None:
+                url, path = replacement
+                yield scrapy.Request(
+                    url,
+                    callback=self.save_page,
+                    errback=self.on_error,
+                    cb_kwargs={"path": path, "url": url},
+                    dont_filter=True,
+                )
+        else:
+            self.retry_pending.append(
+                (request.cb_kwargs["url"], request.cb_kwargs["path"])
+            )
+
+    def on_idle(self):
+        # All fresh URLs are done; feed the retry queue in batches. Each batch
+        # drains fully before the next idle event fires, so memory stays flat
+        # even with hundreds of thousands of retries. Returning without raising
+        # DontCloseSpider (queue empty) lets the spider close normally.
+        if not self.retry_pending:
+            return
+        if not self.retry_phase_started:
+            self.retry_phase_started = True
+            self.logger.info(
+                "retry phase: re-trying %d failed URLs", len(self.retry_pending)
+            )
+        batch = self.retry_pending[:RETRY_BATCH_SIZE]
+        del self.retry_pending[:RETRY_BATCH_SIZE]
+        for url, path in batch:
+            self.crawler.engine.crawl(
+                scrapy.Request(
+                    url,
+                    callback=self.save_page,
+                    errback=self.on_error,
+                    cb_kwargs={"path": path, "url": url},
+                    meta={"is_retry": True},
+                    dont_filter=True,
+                )
+            )
+        raise DontCloseSpider
 
     def closed(self, reason):
         # Rewrite the failed log once: keep prior failures that didn't recover,
@@ -195,27 +263,23 @@ def scrape_htmls():
     t0 = time.time()
     print(f"Reading and shuffling links from {CLEANED_DATASET_PATH} ...", flush=True)
     links = load_links()
-    pending = pending_downloads(links)
-    already_cached = len(links) - len(pending)
+    already_cached = len(os.listdir(HTML_CACHE_DIR))
+    uncached = pending_downloads(links)
 
-    # --- TEMPORARY DISK CAP: keep total files on disk <= MAX_TOTAL_FILES so the
-    # partial dataset fits the 128GB USB stick. Truncating the (already shuffled)
-    # pending list guarantees we never write more than the cap. Delete this block
-    # to fetch the full dataset once it lives on bigger storage.
-    budget = max(0, MAX_TOTAL_FILES - already_cached)
-    capped = len(pending) > budget
-    if capped:
-        pending = pending[:budget]
-    # ---------------------------------------------------------------------------
+    # FILE_LIMIT targets the *total* cache size, counting files already on
+    # disk. The first `budget` uncached links are seeded immediately; the rest
+    # become the backlog that refills permanently failed slots one-for-one, so
+    # the run ends with FILE_LIMIT files on disk (unless the backlog runs dry).
+    if FILE_LIMIT is None:
+        pending, backlog = uncached, []
+    else:
+        budget = max(FILE_LIMIT - already_cached, 0)
+        pending, backlog = uncached[:budget], uncached[budget:]
 
-    cap_note = (
-        f" (capped at {MAX_TOTAL_FILES:,} total files for the 128GB stick)"
-        if capped
-        else ""
-    )
     print(
         f"{len(links):,} links, {already_cached:,} already cached, "
-        f"{len(pending):,} to fetch{cap_note}. "
+        f"limit {'none' if FILE_LIMIT is None else format(FILE_LIMIT, ',')}, "
+        f"{len(pending):,} to fetch (+{len(backlog):,} backlog). "
         f"Prepared in {time.time() - t0:.1f}s. Starting crawl.",
         flush=True,
     )
@@ -247,8 +311,11 @@ def scrape_htmls():
             "AUTOTHROTTLE_TARGET_CONCURRENCY": 8.0,
             # --- Per-request behaviour ---
             "DOWNLOAD_TIMEOUT": 30,
-            "RETRY_ENABLED": True,
-            "RETRY_TIMES": 2,
+            # Immediate back-to-back retries are disabled; the spider defers
+            # first-round failures to a single retry pass at the end of the
+            # crawl (see on_error/on_idle), which gives flaky hosts time to
+            # recover and keeps dead hosts from eating 3x their timeout.
+            "RETRY_ENABLED": False,
             "REDIRECT_ENABLED": True,
             "COOKIES_ENABLED": False,  # cookie tracking is pure overhead for a one-shot fetch
             "ROBOTSTXT_OBEY": False,   # matches download_htmls.py behaviour
@@ -264,13 +331,12 @@ def scrape_htmls():
             "LOGSTATS_INTERVAL": 5,
         }
     )
-    # Silence Scrapy's own per-failure console output (404/403 "Ignoring response"
-    # and "Gave up retrying" for DNS/timeout). Failures still go to FAILED_LOG;
-    # the console keeps only progress and the final success count.
+    # Silence Scrapy's own per-failure console output (404/403 "Ignoring
+    # response"). Failures still go to FAILED_LOG; the console keeps only
+    # progress and the final success count.
     logging.getLogger("scrapy.spidermiddlewares.httperror").setLevel(logging.WARNING)
-    logging.getLogger("scrapy.downloadermiddlewares.retry").setLevel(logging.CRITICAL)
 
-    process.crawl(RecipeSpider, pending=pending)
+    process.crawl(RecipeSpider, pending=pending, backlog=backlog)
     process.start()
 
 
