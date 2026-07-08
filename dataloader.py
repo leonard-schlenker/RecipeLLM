@@ -22,9 +22,9 @@ def process_batch(batch):
     response_ids = tokenizer([r + tokenizer.eos_token for r in batch["response"]], # batch["response"] + [tokenizer.eos_token], 
                              return_attention_mask=False)["input_ids"]
 
-    input_ids = [i + r for i, r in zip(input_ids, response_ids)]
+    prompt_ids = [i + r for i, r in zip(input_ids, response_ids)]
 
     labels = [[-100] * len(i) + r for i, r in zip(input_ids, response_ids)]
 
-    return {"input_ids": input_ids, "labels": labels}
+    return {"input_ids": prompt_ids, "labels": labels}
 
