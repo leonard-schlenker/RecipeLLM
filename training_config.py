@@ -1,4 +1,5 @@
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+import os
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct")
 
 CHECKPOINT_DIR = "./checkpoints/"
 
