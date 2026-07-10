@@ -14,7 +14,7 @@ def merge_htmls_with_dataset():
                    how="inner").select(
                        pl.col("response"), 
                        pl.struct(role=pl.lit("user"),
-                                 content=pl.col("html_data")).struct.json_encode().alias("input")
+                                 content=pl.col("html_data")).alias("input")# .struct.json_encode().alias("input")
                 ).sink_parquet(TRAINING_READY_DATASET_PATH, engine="streaming", compression="zstd")
 
 
