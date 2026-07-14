@@ -1,10 +1,11 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from itertools import islice
 from pathlib import Path
 from pyarrow.parquet import ParquetWriter
 import pyarrow as pa
 import math
-from bs4 import BeautifulSoup
+import re 
+from selectolax.lexbor import LexborHTMLParser
 
 from data_generation_config import (
     BATCH_SIZE, 
@@ -14,10 +15,9 @@ from data_generation_config import (
 )
 
 def clean_html(html: str) -> str: 
-    text = BeautifulSoup(html, 'lxml').get_text()
-    text = text.replace(r"\n+", " ")
-    text = text.replace(r"\t+", " ")
-    text = text.replace(r"\ +", " ")
+    text = LexborHTMLParser(html).text(separator=" ")
+    text = re.sub("[\n|\t]+", " ", text)
+    text = re.sub("\s+", " ", text)
     return text
 
 def load_file(path: Path) -> str:
@@ -40,10 +40,10 @@ def convert_htmls_to_parquet():
     i = 1
 
     with ParquetWriter(HTML_PARQUET_PATH, schema, compression="zstd") as writer:
-        with ThreadPoolExecutor(max_workers=N_WORKERS_FILE_LOADING) as pool: 
+        with ProcessPoolExecutor(max_workers=N_WORKERS_FILE_LOADING) as pool: 
             for file_batch in batch(files, BATCH_SIZE): 
                 print(f"Processing batch {i}/{total_files}")
-                results = list(pool.map(preprocess_file, file_batch))
+                results = list(pool.map(preprocess_file, file_batch, chunksize=64))
                 file_names = list(map(lambda x: x.stem, file_batch))
                 table = pa.Table.from_arrays([file_names, results], schema=schema)
                 writer.write_table(table, row_group_size=512)
@@ -51,3 +51,4 @@ def convert_htmls_to_parquet():
 
 if __name__ == '__main__': 
     convert_htmls_to_parquet()
+
