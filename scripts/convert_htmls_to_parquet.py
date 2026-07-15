@@ -7,17 +7,21 @@ import math
 import re 
 from selectolax.lexbor import LexborHTMLParser
 
-from data_generation_config import (
+from scripts.data_generation_config import (
     BATCH_SIZE, 
     N_WORKERS_FILE_LOADING, 
     HTML_CACHE_DIR, 
     HTML_PARQUET_PATH
 )
 
+CHARS_TO_REMOVE = re.compile("[\n|\t|\xa0| ]+")
+
 def clean_html(html: str) -> str: 
-    text = LexborHTMLParser(html).text(separator=" ")
-    text = re.sub("[\n|\t]+", " ", text)
-    text = re.sub("\s+", " ", text)
+    text = LexborHTMLParser(html)
+    text.strip_tags(['style', 'script'])
+
+    text = CHARS_TO_REMOVE.sub(" ", text)
+
     return text
 
 def load_file(path: Path) -> str:
