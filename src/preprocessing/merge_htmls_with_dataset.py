@@ -27,7 +27,8 @@ def merge_htmls_with_dataset():
 
     dataset = htmls.join(
         dataset, 
-        on='hash', 
+        left_on='hash',
+        right_on='link_hash', 
         how='inner'
     )
 
@@ -51,7 +52,8 @@ def merge_htmls_with_dataset():
     htmls = pl.scan_parquet(HTML_PARQUET_PATH)
 
     dataset = htmls.join(dataset, 
-                         on='hash', 
+                         left_on='hash',
+                         right_on='link_hash',
                          how='inner'
                         ).select(
                              pl.col("response"), 

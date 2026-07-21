@@ -257,6 +257,10 @@ class RecipeSpider(scrapy.Spider):
         # progress line every PROGRESS_EVERY saves instead.
         self.saved += 1
         self.remaining -= 1
+        # A 200 response isn't necessarily a saved file, so "file written" is
+        # counted here rather than derived from downloader stats; the
+        # TensorboardStats extension samples this counter once a minute.
+        self.crawler.stats.inc_value("scrape/htmls_saved")
         if self.saved % PROGRESS_EVERY == 0:
             self.logger.info(
                 "saved %d pages, %d left to visit (latest: %s)",
@@ -281,12 +285,14 @@ class RecipeSpider(scrapy.Spider):
         if request.meta.get("is_retry"):
             self.failed_log.write(request.cb_kwargs["url"] + "\n")
             self.failed_log.flush()  # survive a hard kill mid retry-phase
+            self.crawler.stats.inc_value("scrape/failed_permanently")
             replacement = next(self.backlog, None)
             if replacement is None:
                 # Backlog exhausted: the failed slot dead-ends instead of
                 # respawning a replacement request.
                 self.remaining -= 1
             else:
+                self.crawler.stats.inc_value("scrape/backlog_drawn")
                 url, path = replacement
                 yield scrapy.Request(
                     url,
@@ -412,6 +418,11 @@ def scrape_htmls():
             "LOG_LEVEL": "INFO",
             # Default heartbeat is every 60s — too sparse to tell it's alive.
             "LOGSTATS_INTERVAL": 5,
+            # --- Monitoring: mirror crawl stats to TensorBoard once a minute
+            # (see tensorboard_stats.py; view with `tensorboard --logdir
+            # runs/scrape`). Bare module path because the script runs with
+            # scripts/ as sys.path[0], same as the config import above.
+            "EXTENSIONS": {"tensorboard_stats.TensorboardStats": 500},
         }
     )
     # Silence Scrapy's own per-failure console output (404/403 "Ignoring

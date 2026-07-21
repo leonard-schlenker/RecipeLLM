@@ -3,7 +3,7 @@ The goal of this script is to prepare the downloaded RecipeNLG dataset for scrap
 """
 
 import polars as pl
-from data_generation_config import ORIG_DATASET_PATH, CLEANED_DATASET_PATH
+from scripts.data_generation_config import ORIG_DATASET_PATH, CLEANED_DATASET_PATH
 from typing import Tuple
 
 def format_links(df: pl.LazyFrame) -> pl.LazyFrame: 
@@ -39,6 +39,32 @@ def build_responses(df: pl.LazyFrame) -> pl.LazyFrame:
 
     return df
 
+def deduplicate(df: pl.LazyFrame) -> pl.LazyFrame: 
+
+    df = _sort_df_by_website_distr(df)
+
+    df = _remove_exact_duplicates(df)
+
+    ...
+
+def _sort_df_by_website_distr(df: pl.LazyFrame, descending=False) -> pl.LazyFrame: 
+    website_distr = df.group_by("website").len()
+
+    df = df.join(website_distr, on="website", how="inner")
+
+    df = df.sort(by="len")
+
+    df = df.drop("len")
+
+    return df 
+
+def _remove_exact_duplicates(df: pl.LazyFrame) -> pl.LazyFrame: 
+    # we keep the first because we previously sorted the rows by how many websites their website of origin provides
+
+    # by keeping the first we choose recipes from websites that deliver few samples thereby moving towards more 
+    # uniformyly distributed dataset and keeping extracted structure of recipes more diverse 
+    return df.unique(subset=pl.col("response"), keep="first")
+    
 def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame:
     # Native polars hash runs parallel over the column, unlike a per-row
     # hashlib map_elements. Stored as string because downstream the hash is
@@ -46,7 +72,7 @@ def compute_link_hashes(df: pl.LazyFrame) -> pl.LazyFrame:
     # across polars versions, so this stored column is the single source of
     # truth — never recompute it, always read it back (scrape_htmls.py does).
     df = df.with_columns(
-        pl.col("link").hash(seed=0).cast(pl.String).alias("hash")
+        pl.col("link").hash(seed=0).cast(pl.String).alias("link_hash")
     )
 
     return df
@@ -95,7 +121,7 @@ def prepare_dataset():
     df = df.select(
         pl.col("link"),
         pl.col("website"), 
-        pl.col("hash"), 
+        pl.col("link_hash"), 
         pl.col("response")
     )
 
